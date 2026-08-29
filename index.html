@@ -1,0 +1,2105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>我的旅行足迹</title>
+  <!-- 本地依赖：完全离线，无需联网 -->
+  <script src="assets/d3.min.js"></script>
+  <script src="assets/topojson-client.min.js"></script>
+  <script src="assets/world-data.js"></script>
+  <style>
+    /* ========== 基础 ========== */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Noto Sans CJK SC', sans-serif;
+      background: #f6f1e7;
+      color: #1f2937;
+      overflow: hidden;
+    }
+
+    /* ========== 地图容器 ========== */
+    #mapWrap {
+      position: absolute; inset: 0;
+      background: #e6e1d2;
+      z-index: 1;
+      overflow: hidden;
+    }
+    svg#map {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      display: block;
+    }
+    /* 国家路径 */
+    .country {
+      fill: #ede5d0;
+      stroke: #c4b896;
+      stroke-width: 0.5;
+      stroke-linejoin: round;
+      transition: fill 0.18s ease;
+    }
+    .country.visited {
+      fill: #d9b88a;
+    }
+    .country.visited:hover {
+      fill: #c8965c;
+    }
+    /* 时间轴未到年份的国家：还原成"未到访"的浅色，与国旗/蓝点同步淡化 */
+    .country.visited.dim { fill: #ede5d0; }
+    .country.visited.dim:hover { fill: #e6dfca; }
+    .country-bg {
+      fill: #b8d4e0;  /* 海洋 */
+    }
+    .graticule {
+      fill: none;
+      stroke: rgba(180, 165, 130, 0.25);
+      stroke-width: 0.4;
+      stroke-dasharray: 1,2;
+    }
+
+    /* ========== 标记层（随地图一起缩放） ========== */
+    #markerLayer {
+      position: absolute; inset: 0;
+      pointer-events: none;     /* 空白处事件穿透到地图容器，便于拖拽平移 */
+      transform-origin: 0 0;    /* 与 SVG g 的变换原点保持一致 */
+      z-index: 10;
+    }
+    #markerLayer .country-marker,
+    #markerLayer .city-marker { pointer-events: auto; }
+
+    /* ========== 缩放控制 ========== */
+    .zoom-ctrl {
+      position: absolute; bottom: 24px; left: 24px; z-index: 1000;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .zoom-ctrl button {
+      width: 44px; height: 44px; border-radius: 12px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: 0 6px 20px rgba(60, 40, 20, 0.12);
+      font-size: 24px; font-weight: 600; color: #b87333;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1;
+      transition: transform 0.15s, background 0.15s;
+    }
+    .zoom-ctrl button:hover { transform: scale(1.06); background: #fff; }
+    .zoom-ctrl button:active { transform: scale(0.96); }
+
+    /* ========== 标题 ========== */
+    .header {
+      position: absolute; top: 24px; left: 24px; z-index: 1000;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      padding: 14px 22px; border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(60, 40, 20, 0.10);
+      border: 1px solid rgba(255, 255, 255, 0.5);
+    }
+    .header h1 {
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', 'Noto Serif SC', serif;
+      font-size: 19px; font-weight: 700;
+      letter-spacing: 1px; color: #1f2937;
+    }
+    .header .subtitle {
+      font-size: 11px; color: #9b8060;
+      margin-top: 3px; letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    /* ========== 自动保存状态指示 ========== */
+    .autosave-status {
+      position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+      z-index: 1000;
+      font-size: 12px; padding: 6px 14px; border-radius: 20px;
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 6px 20px rgba(60, 40, 20, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      white-space: nowrap;
+    }
+    .autosave-status.connecting { background: rgba(255,255,255,0.85); color: #9b8060; }
+    .autosave-status.ok { background: rgba(232, 247, 233, 0.95); color: #2f7d4f; border-color: rgba(120,200,140,0.5); }
+    .autosave-status.warn { background: rgba(255, 244, 230, 0.95); color: #b87333; border-color: rgba(184,115,51,0.5); white-space: normal; max-width: 340px; text-align: center; line-height: 1.45; }
+
+    /* ========== 统计面板 ========== */
+    .stats {
+      position: absolute; top: 24px; right: 24px; z-index: 1000;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      padding: 14px 18px; border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(60, 40, 20, 0.10);
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      width: fit-content;
+      max-width: 220px;
+    }
+    .stats-number { display: flex; gap: 20px; margin-bottom: 12px; }
+    .stat-item { display: flex; flex-direction: column; align-items: center; }
+    .stat-num {
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', 'Noto Serif SC', serif;
+      font-size: 34px; font-weight: 700;
+      color: #b87333; line-height: 1;
+    }
+    .stat-label {
+      font-size: 11px; color: #9b8060;
+      margin-top: 5px; letter-spacing: 1px;
+    }
+    .stats-regions {
+      font-size: 13px; line-height: 1.9;
+      color: #4b5563;
+      border-top: 1px dashed #e6dcc7;
+      padding-top: 12px;
+    }
+    .region-line { display: flex; justify-content: space-between; align-items: baseline; gap: 18px; }
+    .region-line .count {
+      color: #b87333; font-weight: 600;
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', serif;
+    }
+
+    /* ========== 国家标记 ========== */
+    .country-marker {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: white;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 7px;
+      box-shadow:
+        0 2px 7px rgba(60, 40, 20, 0.18),
+        0 0 0 1.5px rgba(184, 115, 51, 0.25);
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+      user-select: none;
+      z-index: 20;
+    }
+    .country-marker:hover {
+      transform: translate(-50%, -50%) scale(1.18);
+      box-shadow:
+        0 6px 20px rgba(60, 40, 20, 0.25),
+        0 0 0 3px rgba(184, 115, 51, 0.45);
+    }
+
+    /* ========== 城市标记 ========== */
+    .city-marker {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      width: 3.5px; height: 3.5px;
+      border-radius: 50%;
+      background: #1a3a8f;
+      box-shadow: none;
+      cursor: pointer;
+      transition: transform 0.18s ease;
+      z-index: 10;
+    }
+    .city-marker:hover {
+      transform: translate(-50%, -50%) scale(1.5);
+    }
+
+    /* ========== 弹窗（自定义） ========== */
+    .popup {
+      position: absolute;
+      z-index: 1500;
+      background: white;
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: 0 14px 44px rgba(60, 40, 20, 0.22);
+      min-width: 220px; max-width: 320px;
+      transform: translate(-50%, calc(-100% - 18px));
+      pointer-events: auto;
+    }
+    .popup::after {
+      content: '';
+      position: absolute;
+      bottom: -7px; left: 50%;
+      transform: translateX(-50%) rotate(45deg);
+      width: 14px; height: 14px;
+      background: white;
+      box-shadow: 2px 2px 6px rgba(0,0,0,0.06);
+    }
+    .popup-close {
+      position: absolute;
+      top: 6px; right: 6px;
+      background: transparent;
+      border: none;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      cursor: pointer;
+      color: #b8a988;
+      font-size: 16px;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1;
+    }
+    .popup-close:hover { background: #f3eee5; color: #8b6f47; }
+
+    .country-popup { min-width: 220px; }
+    /* 国家弹窗：固定位置（不再浮在标记上方，不再随地图缩放移动） */
+    .popup.country-popup {
+      transform: none !important;
+      left: 24px !important;
+      top: 110px !important;
+      max-height: calc(100vh - 130px);
+      overflow-y: auto;
+    }
+    .popup.country-popup::after { display: none; }
+    .country-popup .flag { font-size: 38px; line-height: 1; margin-bottom: 6px; }
+    .country-popup h3 {
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', 'Noto Serif SC', serif;
+      font-size: 19px; font-weight: 700;
+      margin-bottom: 4px; color: #1f2937;
+    }
+    .country-popup .region-tag {
+      display: inline-block;
+      font-size: 11px;
+      padding: 3px 10px;
+      background: #f3eee5; color: #8b6f47;
+      border-radius: 10px;
+      margin-bottom: 10px;
+      letter-spacing: 0.5px;
+    }
+    .country-popup .city-count {
+      font-size: 13px; color: #6b7280;
+      border-top: 1px solid #f0e8d8;
+      padding-top: 10px; margin-top: 10px;
+    }
+    .country-popup .city-count strong { color: #b87333; font-weight: 700; }
+    .country-popup .city-list { font-size: 13px; margin-top: 8px; }
+    .country-popup .city-item {
+      padding: 5px 0;
+      cursor: pointer;
+      color: #b87333;
+      transition: padding-left 0.15s ease;
+    }
+    .country-popup .city-item:hover {
+      padding-left: 4px;
+      text-decoration: underline;
+    }
+    .country-popup .empty {
+      font-size: 13px; color: #b8a988;
+      font-style: italic; padding: 6px 0;
+    }
+    .country-popup .empty small {
+      display: block; font-size: 11px; color: #c2b18e; margin-top: 3px;
+      font-style: normal;
+    }
+
+    /* 国家弹窗：可滚动 + 城市勾选清单 */
+    .country-popup { max-height: 80vh; display: flex; flex-direction: column; }
+    .city-filter {
+      width: 100%; box-sizing: border-box;
+      margin: 10px 0 8px; padding: 7px 10px;
+      border: 1px solid #e6dcc7; border-radius: 8px;
+      font-size: 13px; color: #4b5563; background: #fdfaf4;
+      outline: none;
+    }
+    .city-filter:focus { border-color: #d9b88a; }
+    .city-checklist {
+      overflow-y: auto; max-height: 42vh;
+      border-top: 1px solid #f0e8d8; padding-top: 6px;
+    }
+    .city-check {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 4px;
+      border-radius: 6px;
+      transition: background 0.12s;
+    }
+    .city-check-label { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; font-size: 13px; color: #4b5563; }
+    .city-check-input { accent-color: #b87333; width: 15px; height: 15px; cursor: pointer; flex: none; }
+    .city-check:hover { background: #f7f1e6; }
+    .city-check.on .city-check-label { color: #b87333; font-weight: 600; }
+    .city-edit {
+      flex: none; border: none; background: #f3eee5; color: #b87333;
+      width: 24px; height: 24px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    .city-edit:hover { background: #b87333; color: #fff; }
+    .export-btn {
+      margin-top: 10px; width: 100%;
+      padding: 9px; border: none; border-radius: 9px;
+      background: #b87333; color: #fff;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .export-btn:hover { background: #a5652c; }
+    .country { cursor: pointer; }
+    .mark-btn {
+      display: block; width: 100%; margin: 4px 0 8px; padding: 9px;
+      border: none; border-radius: 9px; cursor: pointer;
+      font-size: 13px; font-weight: 600;
+      background: #e8eef6; color: #2b6cb0;
+      transition: background 0.15s, color 0.15s;
+    }
+    .mark-btn:hover { background: #d7e3f4; }
+    .mark-btn.on { background: #b87333; color: #fff; }
+    .mark-btn.on:hover { background: #a5652c; }
+    .add-city-row { display: flex; gap: 6px; margin: 6px 0; }
+    .add-city-input {
+      flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid #e3dccd;
+      border-radius: 8px; font-size: 13px;
+    }
+    .add-city-btn {
+      flex: none; padding: 7px 12px; border: none; border-radius: 8px;
+      background: #b87333; color: #fff; font-size: 13px; cursor: pointer;
+    }
+    .add-city-btn:hover { background: #a5652c; }
+
+    /* 城市弹窗 */
+    .city-popup { min-width: 280px; max-width: 320px; max-height: calc(100vh - 30px); overflow-y: auto; }
+    .city-popup h3 {
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', 'Noto Serif SC', serif;
+      font-size: 18px; font-weight: 700;
+      margin-bottom: 2px; color: #1f2937;
+    }
+    .city-popup .country-line {
+      font-size: 12px; color: #6b7280;
+      margin-bottom: 8px;
+    }
+    .city-popup .date {
+      font-size: 12px; color: #b87333;
+      margin-bottom: 10px; font-weight: 500;
+    }
+    .city-popup .photos {
+      display: flex; gap: 6px; flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .city-popup .photos img {
+      width: 84px; height: 84px; object-fit: cover;
+      border-radius: 8px; cursor: pointer;
+      transition: transform 0.2s;
+      background: #f0e8d8;
+    }
+    .city-popup .photos img:hover { transform: scale(1.06); }
+    .city-popup .story {
+      font-size: 13px; color: #4b5563;
+      line-height: 1.7;
+      border-top: 1px solid #f0e8d8;
+      padding-top: 10px;
+    }
+
+    /* ========== 地点简介 / 照片（国家 & 城市共用） ========== */
+    .edit-place {
+      margin: 8px 0 6px; padding: 6px 10px;
+      border: 1px dashed #d9b88a; border-radius: 8px;
+      background: #fdfaf4; color: #b87333;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      width: 100%; text-align: left;
+    }
+    .edit-place:hover { background: #f7f1e6; }
+    .place-view { margin-top: 4px; }
+    .place-view .empty-hint { font-size: 12px; color: #b8a988; font-style: italic; margin: 4px 0; }
+    .place-view .story-text {
+      font-size: 13px; color: #4b5563; line-height: 1.7;
+      white-space: pre-wrap; word-break: break-word;
+      border-top: 1px solid #f0e8d8; padding-top: 8px; margin-top: 6px;
+    }
+    .gallery { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+    .gallery img {
+      width: 70px; height: 70px; object-fit: cover;
+      border-radius: 8px; cursor: pointer; transition: transform 0.2s;
+      background: #f0e8d8;
+    }
+    .gallery img:hover { transform: scale(1.05); }
+
+    /* ========== 悬浮展示卡（鼠标悬停，只读） ========== */
+    .hover-card {
+      min-width: 180px; max-width: 280px;
+      padding: 10px 12px;
+      transform: translate(-50%, calc(-100% - 16px));
+      pointer-events: none;     /* 只读展示，不拦截鼠标 */
+    }
+    .hover-card::after { display: none; }
+    .hover-card .hc-title {
+      font-size: 12px; color: #9b8060; margin-bottom: 5px; letter-spacing: .5px;
+    }
+    .hover-card .gallery { margin-top: 8px; }
+    .hover-card .gallery img { width: 56px; height: 56px; cursor: default; }
+    .hover-card .story-text { font-size: 12px; }
+    .hover-card .empty-hint { font-size: 12px; color: #b8a988; font-style: italic; }
+
+    /* ========== 编辑器 ========== */
+    .place-editor { margin-top: 6px; }
+    .date-row {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .date-row label {
+      font-size: 12px; color: #b87333; font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .date-input {
+      padding: 5px 10px; border: 1px solid #e6dcc7; border-radius: 8px;
+      font-size: 13px; font-family: inherit; color: #4b5563;
+      background: #fff; outline: none;
+      transition: border-color 0.15s;
+    }
+    .date-input:focus { border-color: #d9b88a; }
+    .date-hint {
+      font-size: 11px; color: #b8a988; font-style: italic;
+    }
+    .date-tag {
+      display: inline-block;
+      font-size: 11px; font-weight: 500;
+      color: #b87333;
+      background: rgba(184, 115, 51, 0.10);
+      border: 1px solid rgba(184, 115, 51, 0.20);
+      padding: 1px 8px;
+      border-radius: 10px;
+      margin-left: 8px;
+      vertical-align: middle;
+      letter-spacing: 0.3px;
+      font-family: 'Helvetica Neue', system-ui, sans-serif;
+    }
+    .country-popup h3 .date-tag { font-size: 12px; }
+    .city-popup h3 .date-tag { font-size: 12px; }
+    /* 悬浮卡的小年月 */
+    .hover-card .hc-title .date-tag { font-size: 10px; padding: 0 6px; margin-left: 6px; }
+    .story-input {
+      width: 100%; box-sizing: border-box; min-height: 92px; resize: vertical;
+      padding: 8px 10px; border: 1px solid #e6dcc7; border-radius: 8px;
+      font-size: 13px; font-family: inherit; color: #4b5563; outline: none;
+      line-height: 1.6;
+    }
+    .story-input:focus { border-color: #d9b88a; }
+    .photo-drop {
+      margin: 8px 0; border: 1.5px dashed #d9b88a; border-radius: 10px;
+      padding: 14px; text-align: center; color: #b8a988; font-size: 12px;
+      cursor: pointer; background: #fdfaf4;
+    }
+    .photo-drop.drag { background: #f3ead9; border-color: #b87333; color: #b87333; }
+    .photo-edit-list { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .photo-thumb { position: relative; width: 62px; height: 62px; }
+    .photo-thumb img { width: 62px; height: 62px; object-fit: cover; border-radius: 8px; }
+    .photo-thumb .rm {
+      position: absolute; top: -6px; right: -6px;
+      width: 18px; height: 18px; border-radius: 50%;
+      border: none; background: #b87333; color: #fff;
+      font-size: 12px; line-height: 1; cursor: pointer;
+    }
+    .editor-actions { display: flex; gap: 8px; }
+    .editor-actions button {
+      flex: 1; padding: 8px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .editor-actions .save-edit { background: #b87333; color: #fff; }
+    .editor-actions .save-edit:hover { background: #a5652c; }
+    .editor-actions .cancel-edit { background: #eee3d2; color: #8b6f47; }
+
+    /* ========== 帮助按钮 ========== */
+    /* 右下角浮动按钮组：上方一行时间轴 + 下方一行 fab 三个按钮 */
+    .fab-cluster {
+      position: absolute; bottom: 24px; right: 24px; z-index: 1000;
+      display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+    }
+    .fab-row { display: flex; align-items: center; gap: 12px; }
+    .quick-backup {
+      position: static;
+      background: linear-gradient(135deg, #b87333, #d4943d);
+      color: #fff;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 22px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(184, 115, 51, 0.35);
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .quick-backup:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(184, 115, 51, 0.5);
+    }
+    .quick-backup:active { transform: translateY(0); }
+    .quick-backup .badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 7px;
+      background: rgba(255, 255, 255, 0.25);
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .help-btn {
+      position: static;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      box-shadow: 0 6px 20px rgba(60, 40, 20, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      font-size: 20px; font-weight: 600;
+      color: #b87333;
+      transition: transform 0.15s;
+    }
+    .fab-cluster .help-btn:hover { transform: scale(1.08); background: rgba(255, 255, 255, 0.92); }
+
+    /* ========== 模态框 ========== */
+    .modal-mask {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(60, 40, 20, 0.4);
+      backdrop-filter: blur(4px);
+      z-index: 2000;
+      align-items: center; justify-content: center;
+    }
+    .modal-mask.show { display: flex; }
+    .modal {
+      background: white;
+      border-radius: 18px;
+      padding: 32px;
+      max-width: 560px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 24px 60px rgba(60, 40, 20, 0.35);
+      position: relative;
+    }
+    .modal h2 {
+      font-family: 'Songti SC', 'STSong', 'Source Han Serif SC', 'Noto Serif SC', serif;
+      font-size: 22px; font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .modal h3 {
+      font-size: 14px; font-weight: 600;
+      margin: 18px 0 8px; color: #b87333;
+    }
+    .modal p { font-size: 13px; color: #4b5563; line-height: 1.7; margin: 4px 0; }
+    .modal code {
+      background: #f3eee5;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #8b6f47;
+    }
+    .modal pre {
+      background: #2a1f15; color: #fef3c7;
+      padding: 14px 16px; border-radius: 8px;
+      font-size: 12px; line-height: 1.65;
+      overflow-x: auto;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      margin: 8px 0;
+    }
+    .modal .close {
+      position: absolute; top: 16px; right: 16px;
+      cursor: pointer;
+      background: #f3eee5;
+      border: none;
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      font-size: 18px; color: #8b6f47;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+    }
+    .modal .close:hover { background: #e8dcc4; }
+
+    /* 导出弹窗 */
+    #exportModal .modal { max-width: 660px; }
+    #exportCode {
+      background: #2a1f15; color: #fef3c7;
+      padding: 14px 16px; border-radius: 8px;
+      font-size: 12px; line-height: 1.6;
+      overflow-x: auto; max-height: 50vh; overflow-y: auto;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      white-space: pre; margin: 10px 0;
+    }
+    .export-actions { display: flex; gap: 10px; margin-top: 6px; }
+    .export-actions button {
+      flex: 1; padding: 10px; border: none; border-radius: 9px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .export-actions .copy { background: #b87333; color: #fff; }
+    .export-actions .copy:hover { background: #a5652c; }
+    .export-actions .dl { background: #f3eee5; color: #8b6f47; }
+    .export-actions .dl:hover { background: #e8dcc4; }
+
+    /* ========== 灯箱 ========== */
+    .lightbox-mask {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.92);
+      z-index: 3000;
+      align-items: center; justify-content: center;
+    }
+    .lightbox-mask.show { display: flex; }
+    .lightbox-img {
+      max-width: 90vw; max-height: 85vh;
+      object-fit: contain;
+      border-radius: 6px;
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    }
+    .lightbox-nav {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      background: rgba(255, 255, 255, 0.15);
+      border: none; color: white;
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      font-size: 28px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .lightbox-nav:hover { background: rgba(255, 255, 255, 0.3); }
+    .lightbox-prev { left: 28px; }
+    .lightbox-next { right: 28px; }
+    .lightbox-close {
+      position: absolute; top: 24px; right: 24px;
+      background: rgba(255, 255, 255, 0.15);
+      border: none; color: white;
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      font-size: 22px;
+      cursor: pointer;
+    }
+    .lightbox-close:hover { background: rgba(255, 255, 255, 0.3); }
+
+    /* ========== 旅行时间轴（放在右下角 fab-cluster 第一行） ========== */
+    .timeline {
+      display: flex; align-items: center; gap: 12px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(0,0,0,0.06); border-radius: 12px;
+      padding: 8px 14px; box-shadow: 0 4px 18px rgba(0,0,0,0.08);
+      font-size: 13px; color: #5b4a36;
+    }
+    .timeline .tl-label { font-weight: 600; white-space: nowrap; }
+    .timeline input[type=range] { width: 180px; accent-color: #c98a3c; cursor: pointer; }
+    .timeline .tl-year { font-weight: 700; color: #c98a3c; min-width: 46px; text-align: center; }
+    .timeline .tl-all { border: none; background: #f0e6d6; color: #7a5a32; border-radius: 8px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+    .timeline .tl-all:hover { background: #e6d7bf; }
+    .timeline .tl-count { color: #9b8060; white-space: nowrap; }
+
+    /* 航线（SVG 内 path，随地图缩放） */
+    #routes path { fill: none; stroke: #e0792f; stroke-width: 1.4; stroke-opacity: 0.65; stroke-dasharray: 5 4; }
+
+    /* 时间轴未到年份的标记：淡化隐藏 */
+    #markerLayer .country-marker.dim, #markerLayer .city-marker.dim {
+      opacity: 0.1; filter: grayscale(1); pointer-events: none;
+    }
+
+    /* 航线 / 相册 按钮（fab） */
+    .tl-toggle, .photo-wall-btn {
+      border: none; cursor: pointer; border-radius: 10px;
+      padding: 8px 12px; font-size: 13px; font-weight: 600;
+      background: rgba(255,255,255,0.9); color: #8a5a28;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .tl-toggle:hover, .photo-wall-btn:hover { background: #fff; }
+    .tl-toggle.off { opacity: 0.5; text-decoration: line-through; }
+
+    /* ========== 照片墙 ========== */
+    .photowall-mask {
+      position: fixed; inset: 0; z-index: 950;
+      background: rgba(24,18,12,0.94); display: none; flex-direction: column;
+    }
+    .photowall-mask.show { display: flex; }
+    .photowall-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; color: #f5ead8; }
+    .photowall-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+    .pw-close { background: rgba(255,255,255,0.14); border: none; color: #fff; width: 40px; height: 40px; border-radius: 50%; font-size: 22px; cursor: pointer; }
+    .pw-close:hover { background: rgba(255,255,255,0.26); }
+    .photowall-body { flex: 1; overflow-y: auto; padding: 0 24px 30px; }
+    .pw-country { margin-top: 24px; }
+    .pw-country h3 { color: #f0d9b5; font-size: 15px; margin: 0 0 12px; border-left: 3px solid #e0792f; padding-left: 10px; }
+    .pw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .pw-grid img { width: 100%; height: 132px; object-fit: cover; border-radius: 8px; cursor: pointer; background: #2a211a; transition: transform .15s; }
+    .pw-grid img:hover { transform: scale(1.03); }
+    .pw-empty { color: #c9b79a; text-align: center; margin-top: 80px; font-size: 15px; line-height: 1.8; }
+
+    /* ========== 加载提示 ========== */
+    .loading {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: #f6f1e7;
+      z-index: 500;
+      color: #9b8060;
+      font-size: 14px;
+      letter-spacing: 1px;
+      transition: opacity 0.4s;
+    }
+    .loading.hide { opacity: 0; pointer-events: none; }
+
+    /* ========== 移动端 ========== */
+    @media (max-width: 640px) {
+      .header { top: 12px; left: 12px; padding: 10px 16px; }
+      .header h1 { font-size: 16px; }
+      .header .subtitle { display: none; }
+      .stats { top: 12px; right: 12px; padding: 12px 16px; min-width: auto; }
+      .stats-number { gap: 18px; }
+      .stat-num { font-size: 24px; }
+      .stats-regions { font-size: 11px; line-height: 1.7; }
+      .help-btn { width: 40px; height: 40px; font-size: 18px; }
+      .fab-cluster { bottom: 12px; right: 12px; gap: 8px; }
+      .quick-backup { padding: 8px 12px; font-size: 12px; }
+      .quick-backup .badge { font-size: 10px; padding: 1px 6px; }
+      .country-marker { width: 15px; height: 15px; font-size: 9px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- 加载提示 -->
+  <div class="loading" id="loading">地图加载中…</div>
+
+  <!-- 地图容器 -->
+  <div id="mapWrap">
+    <svg id="map" xmlns="http://www.w3.org/2000/svg"></svg>
+    <!-- 标记层：国旗/城市点绝对定位，跟随地图缩放 -->
+    <div id="markerLayer"></div>
+  </div>
+
+  <div class="header">
+    <h1>我的旅行足迹</h1>
+    <div class="subtitle">Personal Travel Atlas</div>
+  </div>
+  <div id="autosaveStatus" class="autosave-status connecting">自动保存：连接中…</div>
+
+
+  <div class="stats">
+    <div class="stats-number">
+      <div class="stat-item">
+        <div class="stat-num" id="countryCount">0</div>
+        <div class="stat-label">个国家</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num" id="cityCount">0</div>
+        <div class="stat-label">个城市</div>
+      </div>
+    </div>
+    <div class="stats-regions" id="regionStats"></div>
+  </div>
+
+  <div class="fab-cluster">
+    <!-- Timeline row -->
+    <div class="timeline" id="timeline">
+      <span class="tl-label">🗓 时间轴</span>
+      <input type="range" id="tlRange" min="2000" max="2030" value="2030" />
+      <span class="tl-year" id="tlYear">全部</span>
+      <button class="tl-all" id="tlAll">全部</button>
+      <span class="tl-count" id="tlCount"></span>
+      <button class="tl-toggle" id="routeToggleBtn" title="显示/隐藏旅行航线（按时间顺序连接去过的国家）">✈ 航线</button>
+    </div>
+    <!-- Fab row -->
+    <div class="fab-row">
+      <button class="quick-backup" id="quickBackupBtn" title="一键下载你的所有旅行数据（城市勾选 + 简介照片）">💾 备份数据 <span class="badge" id="quickBackupBadge">133 城市</span></button>
+      <button class="photo-wall-btn" id="photoWallBtn" title="按国家查看所有照片">🖼 相册</button>
+      <button class="help-btn" id="helpBtn" title="使用说明">?</button>
+    </div>
+  </div>
+
+  <!-- 缩放控制 -->
+  <div class="zoom-ctrl">
+    <button id="zoomIn" title="放大 (滚轮上滚)">+</button>
+    <button id="zoomOut" title="缩小 (滚轮下滚)">−</button>
+    <button id="zoomReset" title="重置视图">⤾</button>
+  </div>
+
+  <!-- 备份数据模态框：双保险，下载不成功时可直接复制 -->
+  <div class="modal-mask" id="backupModal">
+    <div class="modal" style="max-width:560px;">
+      <button class="close" id="closeBackup">×</button>
+      <h3 style="margin-top:0;">💾 备份你的旅行数据</h3>
+      <p id="backupHint" style="color:#7a6850;font-size:13px;line-height:1.6;margin:8px 0 14px;">
+        数据已打包好（共 <strong id="backupCityCount">0</strong> 个城市）。
+        如果浏览器没自动下载，请按下方"复制"按钮，把框内文字整段粘贴给我即可。
+      </p>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <button class="dl" id="downloadAgainBtn" style="flex:1;">⬇️ 再次下载 JSON</button>
+        <button class="copy" id="copyJsonBtn" style="flex:1;">📋 复制到剪贴板</button>
+      </div>
+      <textarea id="backupJsonArea" readonly style="
+        width:100%; height:280px;
+        font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        font-size:11px; line-height:1.5;
+        padding:10px; border:1px solid #d8c4a4; border-radius:6px;
+        background:#fdf8f0; color:#3a2818;
+        resize:vertical; outline:none;
+      "></textarea>
+      <p id="copyStatus" style="margin:8px 0 0;font-size:12px;color:#3a8050;display:none;">✓ 已复制到剪贴板</p>
+    </div>
+  </div>
+
+  <!-- 帮助模态框 -->
+  <div class="modal-mask" id="helpModal">
+    <div class="modal">
+      <button class="close" id="closeHelp">×</button>
+      <h2>使用说明</h2>
+      <p>这是一个你的私人旅行地图，所有数据都保存在本机的 <code>data.js</code> 里。地图完全离线，不需要联网。</p>
+
+      <h3>📍 添加城市</h3>
+      <p>打开 <code>data.js</code>，在 <code>myCities</code> 数组里加一条：</p>
+      <pre>{
+  name: "巴黎",
+  country_code: "FRA",   // 必须对应 myCountries 里的 code
+  lat: 48.8566,
+  lng: 2.3522,
+  visitDate: "2024-03",
+  photos: ["photos/paris1.jpg"],
+  story: "塞纳河畔的午后……"
+}</pre>
+      <p>保存后浏览器刷新即可看到效果。</p>
+
+      <h3>📷 添加照片</h3>
+      <p>把 jpg/png 放进 <code>photos/</code> 文件夹，在 city 记录的 <code>photos</code> 数组里引用文件名即可。</p>
+
+      <h3>✏️ 在应用里写简介、贴照片（推荐）</h3>
+      <p>点开任意<strong>国家</strong>或<strong>城市</strong>的弹窗，点里面的 <code>✏️ 编辑简介/照片</code>：</p>
+      <ul style="margin:6px 0 0 18px;font-size:13px;color:#4b5563;line-height:1.8;">
+        <li>文字框直接写故事 / 感受 / 攻略；</li>
+        <li>点虚线框或把照片拖进去，即可嵌入照片（自动压缩，存在本浏览器）；</li>
+        <li>点「保存」后，下次再点这个地点就会浮现这段文字和照片。</li>
+      </ul>
+      <p style="margin-top:6px;">想永久备份或换电脑：点右下角 <code>💾 备份数据</code> 下载一个 JSON（含城市、简介、照片），在别处用 <code>📂 恢复数据</code> 导入即可。</p>
+
+      <h3>🌍 标记去过的国家</h3>
+      <p>直接在地图上<strong>点任意国家</strong>（不需要改任何文件），弹窗里点 <code>＋ 标记我来过</code> 即可——该国立刻上色、出现在统计里；再点一次可取消。城市清单从内置主数据自动带出，没有的城市也能手动添加。</p>
+
+      <h3>⚙️ 完全离线</h3>
+      <p>所有地图数据、世界地图 SVG、D3.js 都已下载到本地 <code>assets/</code> 文件夹，无需任何网络。</p>
+
+      <h3>🔍 缩放与平移</h3>
+      <p>滚轮可放大/缩小，按住鼠标拖拽可平移地图，左下角的 <code>+</code> / <code>−</code> / <code>⤾</code> 按钮也能放大、缩小和一键重置视图。</p>
+
+      <h3>✅ 勾选去过的城市</h3>
+      <p>点开任意国家的国旗，会下拉出该国的城市清单，把去过的城市勾上即可，地图上立刻出现城市点，右上角"个城市"计数实时更新。勾选状态自动存在本浏览器里，刷新不丢。</p>
+      <p>选完后数据已自动存在本浏览器；想长期保留或换设备，用右下角 <code>💾 备份数据</code> 导出 JSON 即可。</p>
+
+      <h3>💾 数据备份 / 恢复（防丢失）</h3>
+      <p>勾选的城市、写的简介和照片都只存在<strong>本浏览器</strong>里。如果换电脑、清了浏览器缓存、或用<strong>不同方式</strong>打开本文件（比如从 <code>file://</code> 改成 <code>localhost</code>，或反过来），这些数据可能"看不见"。</p>
+      <p>建议定期点 <code>💾 备份</code> 下载一个 <code>travel-backup.json</code>；在别处/别的电脑用 <code>📂 恢复</code> 导入，城市立刻回来。这比依赖浏览器存储可靠得多。</p>
+      <div class="export-actions" style="margin-top:8px;">
+        <button class="copy" id="backupBtn">💾 备份数据</button>
+        <button class="dl" id="restoreBtn">📂 恢复数据</button>
+        <input type="file" id="restoreFile" accept="application/json,.json" hidden />
+      </div>
+      <p style="margin-top:8px;color:#3a7;">✅ 只要你勾城市 / 保存简介 / 标记国家，页面会<strong>自动存进你自己的浏览器</strong>。别人用同一份工具、各自浏览器互不可见；用「💾 备份数据」才能把数据带走或换电脑。</p>
+    </div>
+  </div>
+
+  <!-- 导出已选城市 -->
+  <div class="modal-mask" id="exportModal">
+    <div class="modal">
+      <button class="close" id="closeExport">×</button>
+      <h2>导出已选城市</h2>
+      <p>下面是按你勾选生成的 <code>myCities</code> 数据（含简介文字）。复制后发给我，我帮你写进 <code>data.js</code>；<br>点"下载 data.js"可保存<strong>完整版</strong>——国家/城市的简介与<strong>照片</strong>都会一并写入文件，方便备份或换电脑。</p>
+      <pre id="exportCode"></pre>
+      <div class="export-actions">
+        <button class="copy" id="copyExport">复制全部</button>
+        <button class="dl" id="dlExport">下载 data.js</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 灯箱 -->
+  <div class="lightbox-mask" id="lightbox">
+    <button class="lightbox-close" id="lbClose">×</button>
+    <button class="lightbox-nav lightbox-prev" id="lbPrev">‹</button>
+    <img class="lightbox-img" id="lbImg" src="" alt="" />
+    <button class="lightbox-nav lightbox-next" id="lbNext">›</button>
+  </div>
+
+  <!-- 照片墙 -->
+  <div class="photowall-mask" id="photoWallMask">
+    <div class="photowall-head">
+      <h2>🖼 我的旅行相册</h2>
+      <button class="pw-close" id="pwClose">×</button>
+    </div>
+    <div class="photowall-body" id="photoWallBody"></div>
+  </div>
+
+  <script src="countries-data.js"></script>
+  <script src="data.js"></script>
+  <script src="saved-state.js"></script>
+  <script>
+    // 梵蒂冈在 countries-110m 里可能没有（太小），特殊处理
+    const SMALL_COUNTRIES = { VAT: 'ITA' }; // 数值缺 → 跟该国放一起
+    // 注：ALPHA3_TO_NUMERIC / MASTER_COUNTRIES / MASTER_BY_CODE 现由 countries-data.js 提供（覆盖全世界 ~174 国）
+    // 反向映射：numeric -> alpha3，供时间轴在 SVG path 上取国家年月（顶层声明，供 openCountryFromFeature 使用）
+    const NUMERIC_TO_ALPHA3 = {};
+
+    // ============================================
+    // 工具
+    // ============================================
+    function countryByCode(code) { return myCountries.find(c => c.code === code) || (typeof MASTER_BY_CODE !== 'undefined' ? MASTER_BY_CODE[code] : null) || null; }
+    function citiesOf(code) { return myCities.filter(c => c.country_code === code); }
+
+    // ============================================
+    // 投影 + 渲染
+    // ============================================
+    const mapWrap = document.getElementById('mapWrap');
+    const svgEl = document.getElementById('map');
+    const markerLayer = document.getElementById('markerLayer');
+    let mapG = null;                 // 可缩放的地图图层（在 try 块内赋值）
+    let routesG = null;              // 旅行航线图层（SVG path 组，随地图缩放）
+    let timelineYear = 2030;         // 时间轴年份；2030 表示「全部」
+    let routesVisible = true;        // 航线是否可见
+    let currentTransform = d3.zoomIdentity;  // 当前缩放/平移变换
+    const W = () => mapWrap.clientWidth;
+    const H = () => mapWrap.clientHeight;
+
+    // ============================================
+    // 已选城市（勾选状态，本地保存）
+    // ============================================
+    let visitedCities = [];
+    let visitedSet = new Set();
+    const LS_KEY = 'tb_visited_cities_v1';
+    const LS_MYCOUNTRIES = 'tb_mycountries_v1';
+
+    function loadVisited() {
+      let arr = [];
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          const a = JSON.parse(raw);
+          if (Array.isArray(a) && a.length) arr = a;
+        }
+      } catch (e) {}
+      if (!arr.length) {
+        // 兜底：沿用 data.js 里已写好的 myCities
+        arr = (typeof myCities !== 'undefined' ? myCities : []).slice();
+      }
+      visitedSet = new Set(arr.map(v => v.country_code + '|' + v.name));
+      // 兼容旧版本可能用过的其它 localStorage key，防止「换 key / 换版本后城市消失」
+      const legacyKeys = ['visited_cities', 'tb_visited', 'my_visited_cities', 'travel_visited_cities', 'tb_selected_cities'];
+      legacyKeys.forEach(k => {
+        try {
+          const raw = localStorage.getItem(k);
+          if (!raw) return;
+          const a = JSON.parse(raw);
+          if (Array.isArray(a)) a.forEach(v => {
+            if (v && v.country_code && v.name) {
+              const key = v.country_code + '|' + v.name;
+              if (!visitedSet.has(key)) { visitedSet.add(key); arr.push(v); }
+            }
+          });
+        } catch (e) {}
+      });
+      visitedCities = arr;
+      // 合并本地自动保存服务写盘的 saved-state.js（跨会话/跨打开方式都生效，比 localStorage 更稳）
+      try {
+        const ss = (typeof window.__SAVED_STATE__ !== 'undefined' && window.__SAVED_STATE__) || {};
+        if (Array.isArray(ss.visitedCities)) ss.visitedCities.forEach(v => {
+          if (v && v.country_code && v.name) {
+            const key = v.country_code + '|' + v.name;
+            if (!visitedSet.has(key)) { visitedSet.add(key); visitedCities.push(v); }
+          }
+        });
+      } catch (e) {}
+      // 已去国家：从浏览器本地读取（分享版从零开始，默认空数组）
+      try {
+        const raw = localStorage.getItem(LS_MYCOUNTRIES);
+        if (raw) { const a = JSON.parse(raw); if (Array.isArray(a) && a.length) myCountries = a; }
+      } catch (e) {}
+    }
+
+    function saveVisited() {
+      try { localStorage.setItem(LS_KEY, JSON.stringify(visitedCities)); } catch (e) {}
+    }
+    function saveMyCountries() {
+      try { localStorage.setItem(LS_MYCOUNTRIES, JSON.stringify(myCountries)); } catch (e) {}
+    }
+
+    // ============================================
+    // 地点内容（简介文字 + 照片），本地保存
+    // 每个地点一个 key：国家 → "country:<CODE>"，城市 → "city:<CODE>:<NAME>"
+    // ============================================
+    const LS_CONTENT = 'tb_place_content_v1';
+
+    // 合并两个 placeContent：对每个地点 id，story 取非空/更长，photos 取更多的一版。
+    // 关键：绝不互相覆盖掉照片——避免 localStorage 满 5MB 时，旧版（无新照片）覆盖已落盘的新版。
+    function mergeContent(base, inc) {
+      const out = Object.assign({}, base || {});
+      inc = inc || {};
+      for (const k in inc) {
+        if (!inc.hasOwnProperty(k)) continue;
+        const a = out[k] || { story: '', photos: [], date: '' };
+        const b = inc[k] || { story: '', photos: [], date: '' };
+        const aPhotos = a.photos || [], bPhotos = b.photos || [];
+        const aStory = a.story || '', bStory = b.story || '';
+        const aDate = (a.date || '').trim(), bDate = (b.date || '').trim();
+        out[k] = {
+          story: bStory.length >= aStory.length ? bStory : aStory,
+          photos: bPhotos.length >= aPhotos.length ? bPhotos : aPhotos,
+          // date 是单值，按"任一非空都保留"；两边都填时优先取新来的一侧（inc）
+          date: bDate || aDate || '',
+        };
+      }
+      return out;
+    }
+
+    let placeContent = {};
+    // 1) data.js 烘焙的 PLACE_CONTENT（默认值）
+    if (typeof PLACE_CONTENT !== 'undefined' && PLACE_CONTENT) {
+      placeContent = Object.assign({}, PLACE_CONTENT);
+    }
+    // 2) localStorage（浏览器会话内，可能只占 5MB 一部分，或已满）
+    try {
+      const raw = localStorage.getItem(LS_CONTENT);
+      if (raw) placeContent = mergeContent(placeContent, JSON.parse(raw) || {});
+    } catch (e) {}
+    // 3) saved-state.js（已落盘，最权威：可含大量照片、不受 5MB 限制）
+    try {
+      const ss = (typeof window.__SAVED_STATE__ !== 'undefined' && window.__SAVED_STATE__) || {};
+      if (ss.placeContent && typeof ss.placeContent === 'object') {
+        placeContent = mergeContent(placeContent, ss.placeContent);
+      }
+    } catch (e) {}
+
+    function getContent(id) {
+      return placeContent[id] || { story: '', photos: [], date: '' };
+    }
+    // 把「旅行年月」（YYYY-MM 字符串）拼到国家/城市标题后；空就不拼
+    function titleWithDate(title, content) {
+      const safe = escapeHtml(title || '');
+      const d = (content && content.date || '').trim();
+      if (!d) return safe;
+      return safe + ' <span class="date-tag">' + escapeHtml(d) + '</span>';
+    }
+    function setContent(id, content) {
+      placeContent[id] = content;
+      // 先尝试写浏览器缓存（5MB 上限，多照片时会满）
+      try {
+        localStorage.setItem(LS_CONTENT, JSON.stringify(placeContent));
+      } catch (e) {
+        // localStorage 满了：没关系，照片已在内存，下面 persistToServer 会落到 saved-state.js（无 5MB 限制）
+        setAutosaveStatus(false);
+      }
+      // 立即（防抖）把含照片的完整数据写盘到 saved-state.js，彻底摆脱 5MB 限制
+      persistToServer();
+    }
+
+    // ============================================
+    // 自动保存：数据只存在「你自己的浏览器本地」（localStorage），不依赖任何服务器。
+    // 别人各用各的浏览器，互不可见；可用「💾 备份数据」导出 JSON 带走 / 恢复。
+    // ============================================
+    function setAutosaveStatus(ok, detail) {
+      const el = document.getElementById('autosaveStatus');
+      if (!el) return;
+      if (detail) { el.title = '说明：' + detail; } else { el.removeAttribute('title'); }
+      if (ok === null) { el.textContent = '自动保存：准备中…'; el.className = 'autosave-status connecting'; }
+      else if (ok)     { el.textContent = '✓ 已自动保存到本地浏览器'; el.className = 'autosave-status ok'; }
+      else             { el.textContent = '⚠ 本地空间不足，请用「💾 备份数据」导出'; el.className = 'autosave-status warn'; }
+    }
+    let _saveTimer = null;
+    function persistToServer() {
+      clearTimeout(_saveTimer);
+      _saveTimer = setTimeout(() => {
+        try {
+          localStorage.setItem(LS_KEY, JSON.stringify(visitedCities));
+          localStorage.setItem(LS_CONTENT, JSON.stringify(placeContent));
+          saveMyCountries();
+          setAutosaveStatus(true, null);
+        } catch (e) {
+          setAutosaveStatus(false, '浏览器本地空间不足（照片过多），请点「💾 备份数据」导出 JSON 留底');
+        }
+      }, 800);
+    }
+
+    function escapeHtml(s) {
+      return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // 把图片文件压缩成 dataURL（限制最长边 1280px，节省本地存储；纯前端，无需网络）
+    function fileToDataURL(file, cb) {
+      if (!file || !file.type || file.type.indexOf('image') !== 0) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let w = img.width, h = img.height;
+          const max = 1280;
+          if (w > max || h > max) {
+            const s = Math.min(max / w, max / h);
+            w = Math.round(w * s); h = Math.round(h * s);
+          }
+          try {
+            const cv = document.createElement('canvas');
+            cv.width = w; cv.height = h;
+            cv.getContext('2d').drawImage(img, 0, 0, w, h);
+            cb(cv.toDataURL('image/jpeg', 0.82));
+          } catch (err) { cb(reader.result); }
+        };
+        img.onerror = () => cb(reader.result);
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // 渲染「查看模式」的简介 + 照片
+    function placeViewHtml(content) {
+      const story = (content.story || '').trim();
+      const photos = content.photos || [];
+      if (!story && !photos.length) {
+        return '<div class="empty-hint">还没有简介和照片，点「✏️ 编辑」添加</div>';
+      }
+      let html = '';
+      if (story) html += `<div class="story-text">${escapeHtml(story)}</div>`;
+      if (photos.length) {
+        html += '<div class="gallery">' +
+          photos.map((p, i) => `<img src="${p}" data-idx="${i}" alt="照片${i + 1}" />`).join('') +
+          '</div>';
+      }
+      return html;
+    }
+
+    // 构建一个编辑器（文字 + 照片），onDone 在保存或取消后回调（用于重绘弹窗）
+    function buildEditor(id, existing, onDone) {
+      const wrap = document.createElement('div');
+      wrap.className = 'place-editor';
+      let photos = (existing.photos || []).slice();
+      const initDate = (existing.date || '').trim();
+      wrap.innerHTML = `
+        <div class="date-row">
+          <label>📅 旅行年月</label>
+          <input type="month" class="date-input" value="${escapeHtml(initDate)}" />
+          <span class="date-hint">填了会在标题旁显示，比如 2024-08</span>
+        </div>
+        <textarea class="story-input" placeholder="写点什么吧：这段旅程的故事、感受、攻略……">${escapeHtml(existing.story || '')}</textarea>
+        <div class="photo-drop">点击选择，或把照片拖到这里</div>
+        <input type="file" accept="image/*" multiple hidden />
+        <div class="photo-edit-list"></div>
+        <div class="editor-actions">
+          <button class="save-edit">保存</button>
+          <button class="cancel-edit">取消</button>
+        </div>`;
+      const dateInput = wrap.querySelector('.date-input');
+      const ta = wrap.querySelector('.story-input');
+      const drop = wrap.querySelector('.photo-drop');
+      const fileInput = wrap.querySelector('input[type=file]');
+      const listEl = wrap.querySelector('.photo-edit-list');
+
+      function renderList() {
+        listEl.innerHTML = photos.map((p, i) =>
+          `<div class="photo-thumb"><img src="${p}" alt=""/><button class="rm" data-i="${i}">×</button></div>`).join('');
+        listEl.querySelectorAll('.rm').forEach(b => {
+          b.onclick = (e) => { e.stopPropagation(); photos.splice(parseInt(b.dataset.i), 1); renderList(); };
+        });
+      }
+      renderList();
+      function addFiles(files) {
+        Array.from(files).forEach(f => fileToDataURL(f, d => { photos.push(d); renderList(); }));
+      }
+      drop.onclick = () => fileInput.click();
+      fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ''; };
+      ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+      drop.addEventListener('drop', e => { if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files); });
+      wrap.querySelector('.save-edit').onclick = () => {
+        setContent(id, { story: ta.value.trim(), photos: photos, date: (dateInput.value || '').trim() });
+        persistToServer();
+        recomputeTimeline();   // 改了年月后立即同步时间轴（国家填色/城市蓝点/航线联动）
+        drawRoutes();
+        onDone();
+      };
+      wrap.querySelector('.cancel-edit').onclick = () => onDone();
+      return wrap;
+    }
+
+    function updateCityCount() {
+      document.getElementById('cityCount').textContent = visitedCities.length;
+    }
+
+    function renderCityMarkers() {
+      markerLayer.querySelectorAll('.city-marker').forEach(n => n.remove());
+      visitedCities.forEach(city => {
+        const coords = latLngToXY(city.lat, city.lng);
+        if (!coords) return;
+        const el = document.createElement('div');
+        el.className = 'city-marker';
+        el.style.left = coords.x + 'px';
+        el.style.top  = coords.y + 'px';
+        el.title = city.name;
+        el.dataset.key = city.country_code + '|' + city.name;
+        el.onclick = (e) => {
+          e.stopPropagation();
+          showCityPopup(city, coords);
+        };
+        el.onmouseenter = (e) => {
+          e.stopPropagation();
+          showHoverCard('city:' + city.country_code + ':' + city.name, coords, city.name);
+        };
+        el.onmouseleave = () => hideHoverCard();
+        markerLayer.appendChild(el);
+      });
+    }
+
+    loadVisited();
+
+    // 页面一加载：标记"自动保存准备中"，并把已读到的数据（localStorage / saved-state.js / data.js）
+    // 静默写盘一次，防止"已勾选但还没点过任何变更"的数据只停留在内存里。
+    // 分享版：所有数据只存浏览器本地（localStorage），不依赖任何服务器。
+    setAutosaveStatus(null);
+    persistToServer();
+
+    // Natural Earth 投影（视觉均衡，最适合世界地图）
+    const projection = d3.geoNaturalEarth1();
+    const pathGen = d3.geoPath().projection(projection);
+
+    // 加载世界地图数据（直接用 <script> 注入的全局变量，避开 file:// 协议下 fetch 被禁的问题）
+    try {
+      const world = window.__WORLD_DATA__;
+      if (!world) throw new Error('世界地图数据未加载（world-data.js 未正确执行）');
+      const countries = topojson.feature(world, world.objects.countries);
+
+      // 自动适配窗口尺寸（带上下边距留白给标题/统计面板）
+      const PAD_TOP = 100, PAD_BOTTOM = 60, PAD_LEFT = 40, PAD_RIGHT = 40;
+      projection.fitExtent(
+        [[PAD_LEFT, PAD_TOP], [W() - PAD_RIGHT, H() - PAD_BOTTOM]],
+        countries
+      );
+
+      // SVG 命名空间
+      const svg = d3.select(svgEl);
+
+      // 海洋背景
+      svg.append('rect')
+        .attr('class', 'country-bg')
+        .attr('x', 0).attr('y', 0)
+        .attr('width', W()).attr('height', H());
+
+      // 国家路径（放到可缩放的 g 图层里；海洋背景保持静止，始终铺满视口）
+      const visitedIds = new Set(
+        myCountries.map(c => ALPHA3_TO_NUMERIC[c.code]).filter(Boolean)
+      );
+      // 反向映射：numeric -> alpha3，供时间轴在 SVG path 上取国家年月（声明在顶层）
+      for (const k in ALPHA3_TO_NUMERIC) NUMERIC_TO_ALPHA3[ALPHA3_TO_NUMERIC[k]] = k;
+
+      mapG = svg.append('g').attr('id', 'mapG');
+      mapG.selectAll('.country')
+        .data(countries.features)
+        .join('path')
+        .attr('class', d => `country ${visitedIds.has(d.id) ? 'visited' : ''}`)
+        .attr('data-code', d => NUMERIC_TO_ALPHA3[d.id] || '')
+        .attr('d', pathGen)
+        .style('cursor', 'pointer')
+        .on('click', (event, d) => openCountryFromFeature(d));
+
+      // 隐藏加载提示
+      document.getElementById('loading').classList.add('hide');
+
+      // 渲染标记
+      renderMarkers();
+      renderCityMarkers();
+      updateCityCount();
+
+      // 旅行航线图层 + 时间轴初始化（必须在 markers 之后，依赖标记 dataset）
+      routesG = mapG.append('g').attr('id', 'routes');
+      setupTimeline();
+      drawRoutes();
+
+      // ============================================
+      // 缩放 / 平移
+      // ============================================
+      const zoom = d3.zoom()
+        .scaleExtent([1, 12])   // 最小=原图，最大=放大 12 倍
+        .on('zoom', (event) => {
+          currentTransform = event.transform;
+          // SVG 图层与标记层用同一个变换矩阵，保持同步
+          mapG.attr('transform', currentTransform);
+          markerLayer.style.transform =
+            `translate(${currentTransform.x}px, ${currentTransform.y}px) scale(${currentTransform.k})`;
+          // 已打开的弹窗：位置跟随地图，但自身不缩放（文字始终清晰）
+          if (currentPopup && currentPopup.__baseCoords) {
+            const b = currentPopup.__baseCoords;
+            currentPopup.style.left = (b.x * currentTransform.k + currentTransform.x) + 'px';
+            currentPopup.style.top  = (b.y * currentTransform.k + currentTransform.y) + 'px';
+          }
+        });
+      d3.select(mapWrap).call(zoom);
+
+      // 缩放按钮
+      d3.select('#zoomIn').on('click', () =>
+        d3.select(mapWrap).transition().duration(200).call(zoom.scaleBy, 1.4));
+      d3.select('#zoomOut').on('click', () =>
+        d3.select(mapWrap).transition().duration(200).call(zoom.scaleBy, 1 / 1.4));
+      d3.select('#zoomReset').on('click', () =>
+        d3.select(mapWrap).transition().duration(250).call(zoom.transform, d3.zoomIdentity));
+    } catch (err) {
+      console.error('地图数据加载失败', err);
+      document.getElementById('loading').textContent = '地图加载失败：' + err.message;
+    }
+
+    // 开发/截图钩子：?demo=ISL 自动打开冰岛弹窗，方便查看"标题旁年月"是否生效
+    if (/[?&]demo=ISL\b/.test(location.search)) {
+      setTimeout(() => {
+        const mark = document.querySelector('#markerLayer .country-marker[title="冰岛"]');
+        if (mark) mark.click();
+      }, 800);
+    }
+
+    // ============================================
+    // 标记渲染（HTML div 绝对定位覆盖在 SVG 上）
+    // ============================================
+    function latLngToXY(lat, lng) {
+      const p = projection([lng, lat]);
+      return p ? { x: p[0], y: p[1] } : null;
+    }
+
+    function renderMarkers() {
+      markerLayer.querySelectorAll('.country-marker').forEach(n => n.remove());
+      myCountries.forEach(c => {
+        const numeric = ALPHA3_TO_NUMERIC[c.code];
+        // 优先用世界地图的地理中心，更准确
+        let coords = null;
+        if (numeric) {
+          const feature = findFeatureById(numeric);
+          if (feature) {
+            const c0 = d3.geoCentroid(feature);
+            coords = latLngToXY(c0[1], c0[0]);
+          }
+        }
+        // 兜底：data.js 里的 lat/lng
+        if (!coords) coords = latLngToXY(c.lat, c.lng);
+
+        if (!coords) return;
+
+        const el = document.createElement('div');
+        el.className = 'country-marker';
+        el.title = c.name_zh;
+        el.dataset.code = c.code;
+        el.textContent = c.flag;
+        el.style.left = coords.x + 'px';
+        el.style.top  = coords.y + 'px';
+        el.onclick = (e) => {
+          e.stopPropagation();
+          showCountryPopup(c, coords);
+        };
+        el.onmouseenter = (e) => {
+          e.stopPropagation();
+          showHoverCard('country:' + c.code, coords, c.name_zh);
+        };
+        el.onmouseleave = () => hideHoverCard();
+        markerLayer.appendChild(el);
+      });
+
+      myCities.forEach(city => {
+        const coords = latLngToXY(city.lat, city.lng);
+        if (!coords) return;
+        const el = document.createElement('div');
+        el.className = 'city-marker';
+        el.style.left = coords.x + 'px';
+        el.style.top  = coords.y + 'px';
+        el.onclick = (e) => {
+          e.stopPropagation();
+          showCityPopup(city, coords);
+        };
+        markerLayer.appendChild(el);
+      });
+    }
+
+    // 缓存 TopoJSON features
+    function findFeatureById(id) {
+      const elements = document.querySelectorAll('svg#map .country');
+      for (const el of elements) {
+        if (el.__data__ && el.__data__.id === id) {
+          return el.__data__;
+        }
+      }
+      return null;
+    }
+
+    // ============================================
+    // 弹窗（绝对定位 HTML）
+    // ============================================
+    let currentPopup = null;
+
+    function showCountryPopup(c) {
+      hidePopup();
+      hideHoverCard();
+      const code = c.code;
+      const master = (typeof CITY_MASTER !== 'undefined' && CITY_MASTER[code]) || [];
+      const isVisited = myCountries.some(x => x.code === code);
+      const clat = c.lat, clng = c.lng;
+      const selCount = () => visitedCities.filter(v => v.country_code === code).length;
+
+      const el = document.createElement('div');
+      el.className = 'popup country-popup';
+      el.style.left = '24px';
+      el.style.top  = '110px';
+      el.innerHTML = `
+        <button class="popup-close">×</button>
+        <div class="flag">${c.flag}</div>
+        <h3>${titleWithDate(c.name_zh, getContent('country:' + code))}</h3>
+        <span class="region-tag">${c.region}</span>
+        <button class="mark-btn ${isVisited ? 'on' : ''}" id="markBtn">${isVisited ? '✓ 已标记来过（点此取消）' : '＋ 标记我来过'}</button>
+        <div class="place-section"></div>
+        <div class="city-count">已选 <strong class="sel-count">${selCount()}</strong> / 共 ${master.length} 个城市</div>
+        <input class="city-filter" type="text" placeholder="筛选城市…" />
+        <div class="city-checklist"></div>
+        <div class="add-city-row">
+          <input class="add-city-input" type="text" placeholder="没有你的城市？手动添加…" />
+          <button class="add-city-btn">添加</button>
+        </div>
+        <button class="export-btn">导出已选 → data.js</button>
+      `;
+      el.addEventListener('wheel', e => e.stopPropagation());
+
+      const checklist = el.querySelector('.city-checklist');
+      const filterInput = el.querySelector('.city-filter');
+      const selCountEl = el.querySelector('.sel-count');
+
+      function renderList() {
+        const f = (filterInput.value || '').trim().toLowerCase();
+        const items = master
+          .filter(city => !f || city.name.toLowerCase().includes(f))
+          .map(city => {
+            const key = code + '|' + city.name;
+            const on = visitedSet.has(key);
+            return `<div class="city-check ${on ? 'on' : ''}">
+              <label class="city-check-label">
+                <input type="checkbox" class="city-check-input" data-key="${key}" ${on ? 'checked' : ''} />
+                <span>${city.name}</span>
+              </label>
+              ${on ? `<button class="city-edit" data-key="${key}" title="编辑该城市简介/照片">✎</button>` : ''}
+            </div>`;
+          }).join('');
+        checklist.innerHTML = items || '<div class="empty">这个国家还没有内置城市，用下面的框手动添加即可</div>';
+      }
+      renderList();
+      filterInput.addEventListener('input', renderList);
+
+      checklist.addEventListener('click', (e) => {
+        const btn = e.target.closest('.city-edit');
+        if (!btn) return;
+        e.stopPropagation();
+        const key = btn.dataset.key;
+        const [cc, name] = key.split('|');
+        const city = master.find(m => (cc + '|' + m.name) === key);
+        if (city) {
+          const coords = latLngToXY(city.lat, city.lng) || { x: 80, y: 200 };
+          showCityPopup({ country_code: cc, name: city.name, lat: city.lat, lng: city.lng }, coords);
+        }
+      });
+
+      checklist.addEventListener('change', (e) => {
+        const cb = e.target.closest('input[type=checkbox]');
+        if (!cb) return;
+        const key = cb.dataset.key;
+        const [cc, name] = key.split('|');
+        if (cb.checked) {
+          const city = master.find(m => (cc + '|' + m.name) === key);
+          if (city && !visitedSet.has(key)) {
+            visitedSet.add(key);
+            visitedCities.push({ country_code: cc, name: city.name, lat: city.lat, lng: city.lng });
+          }
+        } else {
+          visitedSet.delete(key);
+          visitedCities = visitedCities.filter(v => (v.country_code + '|' + v.name) !== key);
+        }
+        saveVisited();
+        refreshQuickBadge();
+        persistToServer();
+        renderCityMarkers();
+        updateCityCount();
+        selCountEl.textContent = selCount();
+        cb.closest('.city-check').classList.toggle('on', cb.checked);
+      });
+
+      // 标记 / 取消标记国家
+      el.querySelector('#markBtn').onclick = (e) => {
+        e.stopPropagation();
+        if (myCountries.some(x => x.code === code)) {
+          if (!confirm('取消标记「' + c.name_zh + '」？该国及其所有城市的记录都会被删除。')) return;
+          myCountries = myCountries.filter(x => x.code !== code);
+          visitedCities = visitedCities.filter(v => v.country_code !== code);
+          visitedSet = new Set(visitedCities.map(v => v.country_code + '|' + v.name));
+          delete placeContent['country:' + code];
+        } else {
+          myCountries.push({ code: c.code, code2: c.code2, name_zh: c.name_zh, name_en: c.name_en, flag: c.flag, lat: c.lat, lng: c.lng, region: c.region });
+        }
+        saveMyCountries();
+        refreshAfterCountryChange();
+        showCountryPopup(c);   // 重新打开刷新按钮状态
+      };
+
+      // 手动添加城市
+      el.querySelector('.add-city-btn').onclick = (e) => {
+        e.stopPropagation();
+        const inp = el.querySelector('.add-city-input');
+        const name = (inp.value || '').trim();
+        if (!name) return;
+        if (!CITY_MASTER[code]) CITY_MASTER[code] = [];
+        if (!CITY_MASTER[code].some(m => m.name === name)) CITY_MASTER[code].push({ name, lat: clat, lng: clng });
+        const key = code + '|' + name;
+        if (!visitedSet.has(key)) {
+          visitedSet.add(key);
+          visitedCities.push({ country_code: code, name, lat: clat, lng: clng });
+        }
+        saveVisited();
+        refreshQuickBadge();
+        persistToServer();
+        renderCityMarkers();
+        updateCityCount();
+        showCountryPopup(c);  // 刷新列表
+      };
+
+      el.querySelector('.popup-close').onclick = hidePopup;
+      el.querySelector('.place-section').appendChild(buildPlaceSection('country:' + code));
+      el.querySelector('.export-btn').onclick = (e) => {
+        e.stopPropagation();
+        showExportModal();
+      };
+
+      mapWrap.appendChild(el);
+      currentPopup = el;
+    }
+
+    function showExportModal() {
+      // 把每个城市的简介/照片从 placeContent 合并进导出数据
+      const merged = visitedCities.map(v => {
+        const c = getContent('city:' + v.country_code + ':' + v.name);
+        return {
+          name: v.name, country_code: v.country_code, lat: v.lat, lng: v.lng,
+          visitDate: v.visitDate || '', photos: c.photos || [], story: c.story || ''
+        };
+      });
+      // 聊天里发的精简版（照片是 dataURL 太大，不贴进聊天；用「下载 data.js」拿完整版）
+      const snippet = 'const myCities = [\n' +
+        merged.map(v => `  { name: "${v.name}", country_code: "${v.country_code}", lat: ${v.lat}, lng: ${v.lng}, visitDate: "${v.visitDate || ''}", photos: [], story: ${JSON.stringify(v.story || '')} }`).join(',\n') +
+        '\n];';
+      // 下载的完整版：含国家简介/照片（PLACE_CONTENT）与每个城市的照片
+      const full = `// 我的旅行数据（由应用导出）\n` +
+        `const myCountries = ${JSON.stringify(myCountries, null, 2)};\n\n` +
+        `const myCities = ${JSON.stringify(merged, null, 2)};\n\n` +
+        `const CITY_MASTER = ${JSON.stringify(CITY_MASTER, null, 2)};\n\n` +
+        `const PLACE_CONTENT = ${JSON.stringify(placeContent, null, 2)};\n`;
+      document.getElementById('exportCode').textContent = snippet;
+      document.getElementById('exportModal').classList.add('show');
+      window.__exportSnippet = snippet;
+      window.__exportFull = full;
+    }
+
+    function showCityPopup(city, coords) {
+      hidePopup();
+      hideHoverCard();
+      const c = countryByCode(city.country_code);
+      const countryName = c ? c.name_zh : '';
+      const flag = c ? c.flag : '';
+      const id = 'city:' + city.country_code + ':' + city.name;
+      const content = getContent(id);
+      const el = document.createElement('div');
+      el.className = 'popup city-popup';
+      el.style.left = coords.x + 'px';
+      el.style.top = coords.y + 'px';
+      el.__baseCoords = coords;   // 记录地图坐标系下的基准点，缩放时重定位
+      el.innerHTML = `
+        <button class="popup-close">×</button>
+        <h3>${titleWithDate(city.name, content)}</h3>
+        <div class="country-line">${flag} ${countryName}</div>
+        <div class="place-section"></div>
+      `;
+      el.querySelector('.popup-close').onclick = hidePopup;
+      el.querySelector('.place-section').appendChild(buildPlaceSection(id));
+      mapWrap.appendChild(el);
+      currentPopup = el;
+    }
+
+    function recolorCountries() {
+      if (!mapG) return;
+      const vids = new Set(myCountries.map(c => ALPHA3_TO_NUMERIC[c.code]).filter(Boolean));
+      mapG.selectAll('.country').classed('visited', d => vids.has(d.id));
+    }
+    function openCountryFromFeature(d) {
+      const code = NUMERIC_TO_ALPHA3[d.id];
+      if (!code) return;
+      const rec = (typeof MASTER_BY_CODE !== 'undefined' && MASTER_BY_CODE[code]) || null;
+      if (rec) showCountryPopup(rec);
+    }
+    function refreshAfterCountryChange() {
+      recolorCountries();
+      renderMarkers();
+      renderCityMarkers();
+      drawRoutes();
+      recomputeTimeline();
+      updateStats();
+      updateCityCount();
+      refreshQuickBadge();
+    }
+
+    function hidePopup() {
+      if (currentPopup && currentPopup.parentNode) {
+        currentPopup.parentNode.removeChild(currentPopup);
+      }
+      currentPopup = null;
+    }
+
+    // ============================================
+    // 悬浮展示卡（鼠标悬停在标记上 → 只读显示已输入的文字+照片）
+    // 与「点击→编辑」分离：hover 只展示，不编辑
+    // ============================================
+    let hoverCard = null;
+    function showHoverCard(key, coords, title) {
+      hideHoverCard();
+      if (currentPopup) return;   // 编辑弹窗打开时不叠加悬浮卡
+      const content = getContent(key);
+      const story = (content.story || '').trim();
+      const photos = content.photos || [];
+      // 只展示"我输入的文字和图片"：没有任何内容时，悬浮不显示任何东西
+      if (!story && !photos.length) return;
+      const el = document.createElement('div');
+      el.className = 'popup hover-card';
+      el.innerHTML = `<div class="hc-title">${titleWithDate(title, content)}</div>${placeViewHtml(content)}`;
+      // 跟随当前缩放/平移，定位到标记处（不随地图持续移动，因为悬浮是瞬时的）
+      el.style.left = (coords.x * currentTransform.k + currentTransform.x) + 'px';
+      el.style.top  = (coords.y * currentTransform.k + currentTransform.y) + 'px';
+      mapWrap.appendChild(el);
+      hoverCard = el;
+    }
+    function hideHoverCard() {
+      if (hoverCard && hoverCard.parentNode) hoverCard.parentNode.removeChild(hoverCard);
+      hoverCard = null;
+    }
+
+    // ============================================
+    // 地点编辑区块（点击标记 → 编辑页）
+    // 默认进入「编辑」模式（textarea + 照片上传）；保存后切回「展示」模式
+    // ============================================
+    function buildPlaceSection(id) {
+      const wrap = document.createElement('div');
+      wrap.className = 'place-section';
+      function renderView() {
+        wrap.innerHTML =
+          `<div class="place-view">${placeViewHtml(getContent(id))}</div>` +
+          `<button class="edit-place">✏️ 编辑简介/照片</button>`;
+        wrap.querySelectorAll('.place-view .gallery img').forEach(img => {
+          img.onclick = (e) => {
+            e.stopPropagation();
+            showLightbox(getContent(id).photos, parseInt(img.dataset.idx));
+          };
+        });
+        wrap.querySelector('.edit-place').onclick = (e) => { e.stopPropagation(); renderEdit(); };
+      }
+      function renderEdit() {
+        const editor = buildEditor(id, getContent(id), () => renderView());
+        wrap.innerHTML = '';
+        wrap.appendChild(editor);
+      }
+      renderEdit();   // 点击 = 编辑页
+      return wrap;
+    }
+
+    // ============================================
+    // 点空白处关闭弹窗（mousedown 捕获阶段，事件链最早一环）
+    // ============================================
+    // 用 mousedown 而非 click：
+    //   - mousedown 在事件链的最早阶段，document 捕获监听一定先于任何元素的 stopPropagation 触发；
+    //   - click 是 mousedown + mouseup 后才合成，d3.zoom 会在 mousedown 时 preventDefault 并注册全局事件，
+    //     一些边界情况下 click 事件可能根本到不了 document；
+    //   - 用户拖地图前必然要先 mousedown，弹窗先关再拖，无需担心冲突。
+    // 用捕获阶段 (true)：
+    //   - 事件从 window → document → ... 向下传，document 第一个接到；
+    //   - 即使 d3.zoom 在 mapWrap 上 stopPropagation，也拦不到 document 捕获阶段。
+    function shouldCloseOnMouseDown(target) {
+      if (!target || target === document || target === window) return true;
+      // 弹窗内 / 国旗 / 城市点 / 任意模态框 / 模态遮罩 → 不关
+      if (target.closest('.popup')) return false;
+      if (target.closest('.country-marker')) return false;
+      if (target.closest('.city-marker')) return false;
+      if (target.closest('.modal')) return false;
+      if (target.closest('.modal-mask')) return false;
+      return true;
+    }
+    document.addEventListener('mousedown', (e) => {
+      if (!currentPopup) return;
+      if (!shouldCloseOnMouseDown(e.target)) return;
+      hidePopup();
+    }, true);  // ← 捕获阶段，在所有元素之前触发
+
+    // 触屏设备（手机/平板）
+    document.addEventListener('touchstart', (e) => {
+      if (!currentPopup) return;
+      const t = e.touches && e.touches[0];
+      if (!t) return;
+      const el = document.elementFromPoint(t.clientX, t.clientY);
+      if (!shouldCloseOnMouseDown(el)) return;
+      hidePopup();
+    }, { capture: true, passive: true });
+
+    // 窗口缩放重渲染
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        // 重新渲染地图 + 标记
+        location.reload();
+      }, 250);
+    });
+
+    // ============================================
+    // 统计
+    // ============================================
+    function updateStats() {
+      document.getElementById('countryCount').textContent = myCountries.length;
+      document.getElementById('cityCount').textContent = visitedCities.length;
+      const regionCount = {};
+      myCountries.forEach(c => { regionCount[c.region] = (regionCount[c.region] || 0) + 1; });
+      document.getElementById('regionStats').innerHTML = Object.entries(regionCount)
+        .sort((a, b) => b[1] - a[1])
+        .map(([r, n]) => `<div class="region-line"><span>${r}</span><span class="count">${n}</span></div>`)
+        .join('');
+    }
+    updateStats();
+
+    // ============================================
+    // 帮助模态框
+    // ============================================
+    const helpModal = document.getElementById('helpModal');
+    document.getElementById('helpBtn').onclick = () => helpModal.classList.add('show');
+    document.getElementById('closeHelp').onclick = () => helpModal.classList.remove('show');
+    helpModal.onclick = (e) => { if (e.target === helpModal) helpModal.classList.remove('show'); };
+
+    // 备份 / 恢复
+    function doBackupDownload() {
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        visitedCities: visitedCities,
+        placeContent: placeContent,
+        myCountries: myCountries
+      };
+      const json = JSON.stringify(data, null, 2);
+
+      // 1) 尝试触发浏览器下载（常规浏览器可用；沙箱预览可能被拦，所以并行做第 2 步）
+      try {
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'travel-backup.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        // 给浏览器一点时间真正开始下载，再回收 URL
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) { /* 静默失败，下面的模态框兜底 */ }
+
+      // 2) 必弹模态框：JSON 全文展示，可全选复制（沙箱预览下载被拦时也能拿到数据）
+      document.getElementById('backupCityCount').textContent = visitedCities.length;
+      document.getElementById('backupJsonArea').value = json;
+      document.getElementById('copyStatus').style.display = 'none';
+      document.getElementById('backupModal').classList.add('show');
+      // 自动全选，方便用户直接 Ctrl+C
+      setTimeout(() => {
+        const ta = document.getElementById('backupJsonArea');
+        ta.focus(); ta.select();
+      }, 50);
+    }
+
+    // 模态框里的按钮
+    document.getElementById('closeBackup').onclick = () => document.getElementById('backupModal').classList.remove('show');
+    document.getElementById('backupModal').onclick = (e) => { if (e.target.id === 'backupModal') document.getElementById('backupModal').classList.remove('show'); };
+    document.getElementById('downloadAgainBtn').onclick = () => {
+      const json = document.getElementById('backupJsonArea').value;
+      try {
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'travel-backup.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      } catch (e) { alert('下载被浏览器拦截，请改用"复制"按钮。'); }
+    };
+    document.getElementById('copyJsonBtn').onclick = async () => {
+      const ta = document.getElementById('backupJsonArea');
+      ta.focus(); ta.select();
+      try {
+        await navigator.clipboard.writeText(ta.value);
+        document.getElementById('copyStatus').style.display = 'block';
+      } catch (e) {
+        // 剪贴板 API 不可用（沙箱常见），引导用户手动 Ctrl+C
+        document.getElementById('copyStatus').textContent = '⌨ 剪贴板 API 不可用，请按 Ctrl/Cmd+C 复制';
+        document.getElementById('copyStatus').style.display = 'block';
+      }
+    };
+    document.getElementById('backupBtn').onclick = doBackupDownload;
+    // 右上角快捷备份：一键直接下载（不用进帮助面板），徽标实时显示当前城市数
+    const quickBtn = document.getElementById('quickBackupBtn');
+    const quickBadge = document.getElementById('quickBackupBadge');
+    function refreshQuickBadge() {
+      if (quickBadge) quickBadge.textContent = visitedCities.length + ' 城市';
+    }
+    quickBtn.onclick = (e) => { e.stopPropagation(); doBackupDownload(); };
+    refreshQuickBadge();
+    document.getElementById('restoreBtn').onclick = () => document.getElementById('restoreFile').click();
+    document.getElementById('restoreFile').onchange = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (Array.isArray(data.visitedCities)) {
+            visitedCities = data.visitedCities;
+            visitedSet = new Set(visitedCities.map(v => v.country_code + '|' + v.name));
+            saveVisited();
+            refreshQuickBadge();
+          }
+          if (Array.isArray(data.myCountries)) {
+            myCountries = data.myCountries;
+            saveMyCountries();
+          }
+          if (data.placeContent && typeof data.placeContent === 'object') {
+            placeContent = data.placeContent;
+            try { localStorage.setItem(LS_CONTENT, JSON.stringify(placeContent)); } catch (err) {}
+          }
+          recolorCountries();
+          renderMarkers();
+          renderCityMarkers();
+          drawRoutes();
+          recomputeTimeline();
+          updateStats();
+          updateCityCount();
+          document.getElementById('countryCount').textContent = myCountries.length;
+          document.getElementById('cityCount').textContent = visitedCities.length;
+          refreshQuickBadge();
+          persistToServer();
+          hidePopup(); hideHoverCard();
+          alert('恢复成功！已恢复 ' + visitedCities.length + ' 个城市的勾选与简介照片。');
+        } catch (err) {
+          alert('恢复失败：文件格式不正确。');
+        }
+      };
+      reader.readAsText(f);
+      e.target.value = '';
+    };
+
+    // 导出模态框
+    const exportModal = document.getElementById('exportModal');
+    document.getElementById('closeExport').onclick = () => exportModal.classList.remove('show');
+    exportModal.onclick = (e) => { if (e.target === exportModal) exportModal.classList.remove('show'); };
+    document.getElementById('copyExport').onclick = () => {
+      const txt = window.__exportSnippet || '';
+      const btn = document.getElementById('copyExport');
+      const done = () => { const old = btn.textContent; btn.textContent = '已复制 ✓'; setTimeout(() => btn.textContent = old, 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(() => {
+          const pre = document.getElementById('exportCode');
+          const r = document.createRange(); r.selectNodeContents(pre);
+          const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        });
+      } else {
+        const pre = document.getElementById('exportCode');
+        const r = document.createRange(); r.selectNodeContents(pre);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      }
+    };
+    document.getElementById('dlExport').onclick = () => {
+      const code = window.__exportFull || '';
+      const blob = new Blob([code], { type: 'text/javascript' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'data.js';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    // ============================================
+    // 灯箱
+    // ============================================
+    let lbPhotos = [], lbIdx = 0;
+    const lightbox = document.getElementById('lightbox');
+    const lbImg = document.getElementById('lbImg');
+
+    function showLightbox(photos, idx) {
+      lbPhotos = photos || [];
+      lbIdx = idx || 0;
+      if (!lbPhotos.length) return;
+      lbImg.src = lbPhotos[lbIdx];
+      lightbox.classList.add('show');
+    }
+    function hideLightbox() { lightbox.classList.remove('show'); }
+
+    document.getElementById('lbClose').onclick = hideLightbox;
+    document.getElementById('lbPrev').onclick = () => {
+      if (!lbPhotos.length) return;
+      lbIdx = (lbIdx - 1 + lbPhotos.length) % lbPhotos.length;
+      showLightbox(lbPhotos, lbIdx);
+    };
+    document.getElementById('lbNext').onclick = () => {
+      if (!lbPhotos.length) return;
+      lbIdx = (lbIdx + 1) % lbPhotos.length;
+      showLightbox(lbPhotos, lbIdx);
+    };
+    lightbox.onclick = (e) => { if (e.target === lightbox) hideLightbox(); };
+
+    document.addEventListener('keydown', (e) => {
+      if (!lightbox.classList.contains('show')) return;
+      if (e.key === 'Escape') hideLightbox();
+      else if (e.key === 'ArrowLeft') document.getElementById('lbPrev').click();
+      else if (e.key === 'ArrowRight') document.getElementById('lbNext').click();
+    });
+
+    // ============================================
+    // 第一档功能：① 时间轴 / 年份切换  ② 飞行连线  ③ 照片墙
+    // ============================================
+
+    // ---- 取某标记的「旅行年月」(YYYY-MM 或 YYYY)，无则返回 '' ----
+    function markerDate(kind, ref) {
+      const id = kind === 'country' ? ('country:' + ref) : ('city:' + ref);
+      return (getContent(id).date || '').trim();
+    }
+    // 城市没有单独年月时，继承所属国家的年月，让蓝点也能随时间轴联动
+    function cityEffectiveDate(key) {
+      const own = markerDate('city', key);
+      if (own) return own;
+      const cc = (key || '').split('|')[0];
+      return cc ? markerDate('country', cc) : '';
+    }
+
+    // ---- ① 时间轴：根据选中年份淡化未到达的标记（国旗 / 国家填色 / 城市蓝点 三处联动）----
+    function recomputeTimeline() {
+      const range = document.getElementById('tlRange');
+      if (!range) return;
+      timelineYear = parseInt(range.value, 10) || 2030;
+      const yr = timelineYear;
+      let datedTotal = 0, shown = 0;
+
+      // 1) HTML 标记层：国旗 emoji + 城市蓝点
+      markerLayer.querySelectorAll('.country-marker, .city-marker').forEach(el => {
+        const isCountry = el.classList.contains('country-marker');
+        const kind = isCountry ? 'country' : 'city';
+        const ref = isCountry ? el.dataset.code : el.dataset.key;
+        if (!ref) return;
+        const d = isCountry ? markerDate('country', ref) : cityEffectiveDate(ref);
+        if (!d) return;                 // 没填年月的永远显示（无时间约束）
+        datedTotal++;
+        const y = parseInt(d.slice(0, 4), 10);
+        const ok = (yr >= 2030) || (y <= yr);   // 2030 = 全部
+        if (ok) shown++;
+        el.classList.toggle('dim', !ok);
+      });
+
+      // 2) SVG 国家填色：与时间轴同步（未到年份的国家还原成浅色"未到访"）
+      document.querySelectorAll('svg#map .country.visited').forEach(path => {
+        const code = path.getAttribute('data-code');
+        if (!code) return;
+        const d = markerDate('country', code);
+        if (!d) return;
+        const y = parseInt(d.slice(0, 4), 10);
+        const ok = (yr >= 2030) || (y <= yr);
+        path.classList.toggle('dim', !ok);
+      });
+
+      document.getElementById('tlYear').textContent = (yr >= 2030) ? '全部' : yr;
+      document.getElementById('tlCount').textContent =
+        datedTotal ? ('· 点亮 ' + shown + ' / ' + datedTotal + ' 处年月') : '';
+    }
+
+    // ---- ② 飞行连线：按年月顺序把去过的国家质心连成弧线 ----
+    function drawRoutes() {
+      if (!routesG) return;
+      routesG.selectAll('*').remove();
+      const pts = [];
+      (typeof myCountries !== 'undefined' ? myCountries : []).forEach(c => {
+        const d = markerDate('country', c.code);
+        if (!d) return;                       // 没年月的国家无法排序，跳过
+        const numeric = ALPHA3_TO_NUMERIC[c.code];
+        let xy = null;
+        if (numeric) {
+          const f = findFeatureById(numeric);
+          if (f) { const g = d3.geoCentroid(f); xy = projection([g[0], g[1]]); }
+        }
+        if (!xy && c.lat != null) xy = projection([c.lng, c.lat]);
+        if (!xy) return;
+        pts.push({ name: c.name_zh, date: d, xy: xy });
+      });
+      pts.sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+
+      // 年份过滤：只连「截至选中年份」之前的国家，形成「逐年点亮航线」效果
+      const yr = timelineYear;
+      const visible = pts.filter(p => (yr >= 2030) || (parseInt(p.date.slice(0, 4), 10) <= yr));
+
+      for (let i = 1; i < visible.length; i++) {
+        const a = visible[i - 1].xy, b = visible[i].xy;
+        const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const lift = Math.min(90, dist * 0.28);   // 控制点上抬，形成弧度
+        const cx = mx, cy = my - lift;
+        routesG.append('path').attr('d', 'M' + a[0] + ',' + a[1] + ' Q' + cx + ',' + cy + ' ' + b[0] + ',' + b[1]);
+      }
+      routesG.style('display', routesVisible ? null : 'none');
+    }
+
+    function setupTimeline() {
+      const range = document.getElementById('tlRange');
+      const allBtn = document.getElementById('tlAll');
+      if (range) {
+        const onInput = () => { recomputeTimeline(); drawRoutes(); };
+        range.addEventListener('input', onInput);
+        range.addEventListener('change', onInput);   // Safari 拖动释放时更可靠
+      }
+      if (allBtn) allBtn.addEventListener('click', () => {
+        if (range) {
+          range.value = 2030;
+          range.dispatchEvent(new Event('input'));    // 走统一路径，确保任何浏览器都生效
+        }
+      });
+      recomputeTimeline();
+    }
+
+    // ---- 航线开关 ----
+    const routeBtn = document.getElementById('routeToggleBtn');
+    if (routeBtn) routeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      routesVisible = !routesVisible;
+      routeBtn.classList.toggle('off', !routesVisible);
+      if (routesG) routesG.style('display', routesVisible ? null : 'none');
+    });
+
+    // ---- ③ 照片墙：按国家分组展示所有照片 ----
+    function renderPhotoWall() {
+      const body = document.getElementById('photoWallBody');
+      if (!body) return;
+      const byCountry = {};   // code -> { name, flag, photos[] }
+      function ensure(code) {
+        if (!byCountry[code]) {
+          const c = (typeof myCountries !== 'undefined') && myCountries.find(x => x.code === code);
+          byCountry[code] = { name: c ? c.name_zh : code, flag: c ? c.flag : '🌍', photos: [] };
+        }
+        return byCountry[code];
+      }
+      Object.keys(placeContent).forEach(id => {
+        const m = id.match(/^(?:country|city):([A-Z]{3})/);
+        if (!m) return;
+        const photos = (placeContent[id].photos || []);
+        if (photos && photos.length) ensure(m[1]).photos.push.apply(ensure(m[1]).photos, photos);
+      });
+      const codes = Object.keys(byCountry).filter(c => byCountry[c].photos.length);
+      if (!codes.length) {
+        body.innerHTML = '<div class="pw-empty">还没有上传照片～<br>在国家的「✏️ 编辑」里传几张吧 📷</div>';
+        return;
+      }
+      codes.sort((a, b) => byCountry[b].photos.length - byCountry[a].photos.length);
+      body.innerHTML = codes.map(code => {
+        const g = byCountry[code];
+        return '<div class="pw-country" data-code="' + code + '">' +
+          '<h3>' + g.flag + ' ' + escapeHtml(g.name) +
+          ' <span style="opacity:.55;font-weight:400">(' + g.photos.length + ')</span></h3>' +
+          '<div class="pw-grid">' +
+          g.photos.map((p, i) => '<img src="' + p + '" data-idx="' + i + '" alt=""/>').join('') +
+          '</div></div>';
+      }).join('');
+      body.querySelectorAll('.pw-country').forEach(div => {
+        const photos = byCountry[div.dataset.code].photos;
+        div.querySelectorAll('.pw-grid img').forEach(img => {
+          img.onclick = () => showLightbox(photos, parseInt(img.dataset.idx, 10));
+        });
+      });
+    }
+    function openPhotoWall() {
+      renderPhotoWall();
+      const mask = document.getElementById('photoWallMask');
+      if (mask) mask.classList.add('show');
+    }
+    function closePhotoWall() {
+      const mask = document.getElementById('photoWallMask');
+      if (mask) mask.classList.remove('show');
+    }
+    const pwBtn = document.getElementById('photoWallBtn');
+    if (pwBtn) pwBtn.addEventListener('click', (e) => { e.stopPropagation(); openPhotoWall(); });
+    const pwClose = document.getElementById('pwClose');
+    if (pwClose) pwClose.addEventListener('click', closePhotoWall);
+    const pwMask = document.getElementById('photoWallMask');
+    if (pwMask) pwMask.addEventListener('click', (e) => { if (e.target.id === 'photoWallMask') closePhotoWall(); });
+
+    // 调试/截图钩子：?pw=1 自动打开照片墙（和 ?demo=ISL 同级）
+    if (/[?&]pw=1\b/.test(location.search)) setTimeout(openPhotoWall, 1200);
+  </script>
+</body>
+</html>
